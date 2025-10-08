@@ -137,7 +137,7 @@ class GenerateParaRefsForDocx:
             return ""
 
     def process_docx_file(self, file_path: str, start_index: int) -> str:
-        """Process a DOCX file and return markdown content including headers or short titles"""
+        """Process a DOCX file and return markdown content including headers and short-title detection"""
         try:
             self.para_id_counter = start_index
             doc = Document(file_path)
@@ -153,12 +153,11 @@ class GenerateParaRefsForDocx:
                     style_name = getattr(paragraph.style, 'name', '').lower() if paragraph.style else ''
                     word_count = len(para_text.split())
 
-                    # Determine if this paragraph should be treated as a header
+                    # Update header, but DO NOT skip adding it
                     if "heading" in style_name or word_count <= 6:
                         current_header = para_text.strip()
-                        continue  # skip adding this as normal content
 
-                    # Normal content
+                    # Add paragraph regardless of whether it's a header
                     self.data.append({
                         'para_id': self.generate_guid(),
                         'header': current_header,
@@ -233,5 +232,3 @@ if __name__ == "__main__":
     output_file = os.path.splitext(args.input_file)[0] + "_output.md"
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(markdown_output)
-
-    print(f"✅ Markdown file generated: {output_file}")
