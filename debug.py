@@ -1,8 +1,10 @@
 from docx import Document
 from docx.table import _Cell, Table
 from docx.text.paragraph import Paragraph
+from docx.oxml.ns import qn
 import os
 import sys
+import re
 
 sys.dont_write_bytecode = True
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
@@ -14,6 +16,7 @@ class GenerateParaRefsForDocx:
         self.tables = []
         self.table_counter = 0
         self.para_id_counter = start_index
+        self.counters = [0, 0, 0, 0, 0]  # For numbering tracking
         self.namespaces = {
             'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
             'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
@@ -24,6 +27,63 @@ class GenerateParaRefsForDocx:
         current_id = self.para_id_counter
         self.para_id_counter += 1
         return str(current_id)
+
+    def get_numbering_info(self, paragraph: Paragraph):
+        """Extract numbering level and format from paragraph."""
+        try:
+            numPr = paragraph._element.pPr.numPr
+            if numPr is None:
+                return None, None
+
+            ilvl = numPr.ilvl
+            numId = numPr.numId
+
+            if ilvl is not None and numId is not None:
+                level = int(ilvl.val)
+                return level, int(numId.val)
+        except:
+            pass
+        return None, None
+
+    def extract_position(self, paragraph: Paragraph, text: str) -> str:
+        """Extract position numbering (e.g., 1, 1.1, 1.1.1) from paragraph"""
+        # Check if text starts with a number pattern (e.g., "12.1", "1)", "12.Indemnification")
+        manual_number = re.match(r'^(\d+(?:\.\d+)*)[.\)]\s*', text)
+
+        # Get Word's built-in numbering information
+        level, num_id = self.get_numbering_info(paragraph)
+
+        if manual_number:
+            # Extract the number from text
+            position = manual_number.group(1)
+
+            # Update counters based on manual numbering
+            parts = position.split('.')
+            for i, part in enumerate(parts):
+                if i < len(self.counters):
+                    self.counters[i] = int(part)
+            # Reset deeper levels
+            for i in range(len(parts), len(self.counters)):
+                self.counters[i] = 0
+
+            return position
+
+        elif level is not None:
+            # Reset counters for deeper levels when going to a shallower level
+            for i in range(level + 1, len(self.counters)):
+                self.counters[i] = 0
+
+            # Increment counter at current level
+            self.counters[level] += 1
+
+            # Build position string (e.g., "1", "1.1", "1.1.1")
+            position_parts = [str(self.counters[i]) for i in range(level + 1) if self.counters[i] > 0]
+            position = ".".join(position_parts[:level + 1])
+
+            return position
+
+        # No numbering found
+        return ""
 
     def extract_insertions_only(self, paragraph: Paragraph) -> str:
         """Extract paragraph text preserving insertions, skipping deletions,
@@ -150,6 +210,9 @@ class GenerateParaRefsForDocx:
                     if not para_text:
                         continue
 
+                    # Extract position numbering
+                    position = self.extract_position(paragraph, para_text)
+
                     style_name = getattr(paragraph.style, 'name', '').lower() if paragraph.style else ''
                     word_count = len(para_text.split())
 
@@ -160,6 +223,7 @@ class GenerateParaRefsForDocx:
                     # Add paragraph regardless of whether it's a header
                     self.data.append({
                         'para_id': self.generate_guid(),
+                        'position': position,
                         'header': current_header,
                         'para_text': para_text
                     })
@@ -176,6 +240,7 @@ class GenerateParaRefsForDocx:
                         })
                         self.data.append({
                             'para_id': self.generate_guid(),
+                            'position': '',
                             'header': current_header,
                             'para_text': f"SEE TABLE_{self.table_counter} below"
                         })
@@ -194,13 +259,15 @@ class GenerateParaRefsForDocx:
         if not self.data:
             return ""
 
-        lines = ["| para_id | header | para_text |", "|---------|---------|-----------|"]
+        lines = ["| para_id | position | header | para_text |",
+                 "|---------|----------|---------|-----------|"]
 
         for item in self.data:
             header = item.get('header', '')
+            position = item.get('position', '')
             escaped_text = item['para_text'].replace('|', '\\|').replace('\n', '<br>')
             escaped_header = header.replace('|', '\\|').replace('\n', '<br>')
-            lines.append(f"| {item['para_id']} | {escaped_header} | {escaped_text} |")
+            lines.append(f"| {item['para_id']} | {position} | {escaped_header} | {escaped_text} |")
 
         result = "\n".join(lines)
 
@@ -216,6 +283,7 @@ class GenerateParaRefsForDocx:
         self.data = []
         self.tables = []
         self.table_counter = 0
+        self.counters = [0, 0, 0, 0, 0]
 
 
 if __name__ == "__main__":
@@ -232,3 +300,6 @@ if __name__ == "__main__":
     output_file = os.path.splitext(args.input_file)[0] + "_output.md"
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(markdown_output)
+
+    print(f"✓ Successfully processed document")
+    print(f"✓ Output saved to: {output_file}")
