@@ -47,8 +47,9 @@ class GenerateParaRefsForDocx:
         }
         # Numbering related attributes
         self.numbering_map = defaultdict(dict)
-        self.global_counters = defaultdict(int)  # Track counters globally by level
-        self.global_stack = {}  # Track the current hierarchy globally
+        self.global_counters = defaultdict(int)
+        self.global_stack = {}
+        self.visible_stack = {}  # Track which levels have visible items
         self.last_numId = None
         self.last_ilvl = -1
 
@@ -70,8 +71,10 @@ class GenerateParaRefsForDocx:
                     ilvl = lvl.attrib.get(f"{{{self.namespaces['w']}}}ilvl")
                     num_fmt_el = lvl.find("w:numFmt", self.namespaces)
                     lvl_text_el = lvl.find("w:lvlText", self.namespaces)
-                    fmt = num_fmt_el.attrib.get(f"{{{self.namespaces['w']}}}val") if num_fmt_el is not None else "bullet"
-                    pattern = lvl_text_el.attrib.get(f"{{{self.namespaces['w']}}}val") if lvl_text_el is not None else "•"
+                    fmt = num_fmt_el.attrib.get(
+                        f"{{{self.namespaces['w']}}}val") if num_fmt_el is not None else "bullet"
+                    pattern = lvl_text_el.attrib.get(
+                        f"{{{self.namespaces['w']}}}val") if lvl_text_el is not None else "•"
                     abs_levels[ilvl] = (fmt, pattern)
                 abstract_nums[abs_id] = abs_levels
 
@@ -122,11 +125,12 @@ class GenerateParaRefsForDocx:
 
         return "".join(parts).strip()
 
-    def get_bullet_number(self, paragraph: Paragraph) -> str:
-        """Extract bullet or number from a paragraph using simplified parent-child hierarchy."""
+    def get_bullet_number(self, paragraph: Paragraph) -> tuple[str, int, str]:
+        """Extract bullet or number from a paragraph using Word's actual values.
+        Returns: (full_bullet_from_word, level, current_value_from_word)"""
         numPr = paragraph._element.find(".//w:numPr", self.namespaces)
         if numPr is None:
-            return ""
+            return "", -1, ""
 
         numId_el = numPr.find("w:numId", self.namespaces)
         ilvl_el = numPr.find("w:ilvl", self.namespaces)
@@ -135,13 +139,14 @@ class GenerateParaRefsForDocx:
         ilvl_int = int(ilvl)
 
         if not numId:
-            return ""
+            return "", -1, ""
 
         # Get current level format type
         fmt_level, _ = self.numbering_map.get(numId, {}).get(str(ilvl_int), ("decimal", "%1"))
 
         # Check if format changed from previous at same level
-        prev_fmt = self.numbering_map.get(self.last_numId, {}).get(str(ilvl_int), ("decimal", "%1"))[0] if self.last_numId else None
+        prev_fmt = self.numbering_map.get(self.last_numId, {}).get(str(ilvl_int), ("decimal", "%1"))[
+            0] if self.last_numId else None
         if self.last_numId and self.last_ilvl == ilvl_int and fmt_level != prev_fmt:
             self.global_counters[ilvl_int] = 0
 
@@ -153,10 +158,10 @@ class GenerateParaRefsForDocx:
             self.global_counters[deeper] = 0
             self.global_stack.pop(deeper, None)
 
-        # Get the counter value for current level
+        # Get the counter value for current level - THIS IS WORD'S ACTUAL VALUE
         n = self.global_counters[ilvl_int]
 
-        # Convert counter to appropriate format based on type
+        # Convert counter to appropriate format based on type - PRESERVE WORD'S VALUE
         if fmt_level == "decimal":
             current_val = str(n)
         elif fmt_level == "upperLetter":
@@ -174,28 +179,62 @@ class GenerateParaRefsForDocx:
         if ilvl_int == 0:
             bullet = current_val
         else:
-            # Get parent's complete label from stack
-            parent_label = self.global_stack.get(ilvl_int - 1, "")
+            # Find the nearest available parent bullet
+            parent_label = self.find_nearest_parent_bullet(ilvl_int)
             bullet = f"{parent_label}.{current_val}" if parent_label else current_val
 
-        # Store complete bullet for this level
+        # Store complete bullet for this level (Word's hierarchy)
         self.global_stack[ilvl_int] = bullet
 
         self.last_numId = numId
         self.last_ilvl = ilvl_int
 
-        return bullet
+        return bullet, ilvl_int, current_val
 
-    def extract_text_from_paragraph(self, paragraph: Paragraph) -> tuple[str, str]:
-        """Extract text and bullet/number from paragraph."""
-        bullet = self.get_bullet_number(paragraph)
+    def find_nearest_parent_bullet(self, current_level: int) -> str:
+        """
+        Find the nearest available parent bullet for the current level.
+        If immediate parent is missing, search up the hierarchy.
+        """
+        # Start from the immediate parent level and work up
+        for parent_level in range(current_level - 1, -1, -1):
+            if parent_level in self.global_stack:
+                return self.global_stack[parent_level]
+
+        # If no parent found, return empty string
+        return ""
+
+    def build_display_bullet(self, level: int, current_val: str) -> str:
+        """
+        Build display bullet using Word's actual value but only visible parents.
+        This does NOT manipulate the counter value - uses Word's exact value.
+        """
+        # Mark this level as visible with Word's actual value
+        self.visible_stack[level] = current_val
+
+        # Reset deeper visible levels
+        for deeper in range(level + 1, 9):
+            self.visible_stack.pop(deeper, None)
+
+        # Build bullet from visible parents only
+        visible_parts = []
+        for lvl in range(level + 1):
+            if lvl in self.visible_stack:
+                visible_parts.append(self.visible_stack[lvl])
+
+        return ".".join(visible_parts)
+
+    def extract_text_from_paragraph(self, paragraph: Paragraph) -> tuple[str, str, int, str]:
+        """Extract text and bullet/number from paragraph.
+        Returns: (bullet, text, level, current_value_from_word)"""
+        bullet, level, current_val = self.get_bullet_number(paragraph)
         text = self.extract_insertions_only(paragraph)
 
         # Remove the numbering from the text if it's already there
         if bullet:
             text = re.sub(r'^[\d\w]+(?:\.[\d\w]+)*[\.\)]\s*', '', text)
 
-        return bullet, text
+        return bullet, text, level, current_val
 
     def extract_cell_content(self, cell: _Cell) -> str:
         """Extract content from a table cell, handling nested tables and paragraphs"""
@@ -203,10 +242,15 @@ class GenerateParaRefsForDocx:
         for element in cell._element:
             if element.tag.endswith('}p'):
                 paragraph = Paragraph(element, cell)
-                bullet, para_text = self.extract_text_from_paragraph(paragraph)
+                bullet, para_text, level, current_val = self.extract_text_from_paragraph(paragraph)
                 if para_text:
-                    if bullet:
-                        content_parts.append(f"{bullet} {para_text}")
+                    # Build display bullet using Word's actual value, skipping invisible parents
+                    if level >= 0 and current_val:
+                        display_bullet = self.build_display_bullet(level, current_val)
+                        if display_bullet:
+                            content_parts.append(f"{display_bullet} {para_text}")
+                        else:
+                            content_parts.append(para_text)
                     else:
                         content_parts.append(para_text)
             elif element.tag.endswith('}tbl'):
@@ -254,15 +298,21 @@ class GenerateParaRefsForDocx:
             self.numbering_map = self.get_numbering(doc)
             self.global_counters.clear()
             self.global_stack.clear()
+            self.visible_stack.clear()
             self.last_numId = None
             self.last_ilvl = -1
 
             for paragraph in doc.paragraphs:
                 if paragraph.text.strip():
-                    bullet, para_text = self.extract_text_from_paragraph(paragraph)
+                    bullet, para_text, level, current_val = self.extract_text_from_paragraph(paragraph)
                     if para_text:
-                        if bullet:
-                            full_text.append(f"{bullet} {para_text}")
+                        # Build display bullet using Word's actual value, skipping invisible parents
+                        if level >= 0 and current_val:
+                            display_bullet = self.build_display_bullet(level, current_val)
+                            if display_bullet:
+                                full_text.append(f"{display_bullet} {para_text}")
+                            else:
+                                full_text.append(para_text)
                         else:
                             full_text.append(para_text)
 
@@ -299,6 +349,7 @@ class GenerateParaRefsForDocx:
             self.numbering_map = self.get_numbering(doc)
             self.global_counters.clear()
             self.global_stack.clear()
+            self.visible_stack.clear()
             self.last_numId = None
             self.last_ilvl = -1
 
@@ -307,19 +358,35 @@ class GenerateParaRefsForDocx:
             for element in doc.element.body:
                 if element.tag.endswith('}p'):
                     paragraph = Paragraph(element, doc)
-                    bullet, para_text = self.extract_text_from_paragraph(paragraph)
+
+                    # Always process bullet numbering to maintain Word's hierarchy state
+                    bullet, level, current_val = self.get_bullet_number(paragraph)
+
+                    # Then check if paragraph has any visible text
+                    para_text = self.extract_insertions_only(paragraph)
                     if not para_text:
+                        # Skip blank/deleted paragraphs from output, but Word's hierarchy is maintained
                         continue
+
+                    # Build display bullet using Word's actual value, skipping invisible parents
+                    if level >= 0 and current_val:
+                        display_bullet = self.build_display_bullet(level, current_val)
+                    else:
+                        display_bullet = ""
+
+                    # Remove the numbering from the text if it's already there
+                    if display_bullet:
+                        para_text = re.sub(r'^[\d\w]+(?:\.[\d\w]+)*[\.\)]\s*', '', para_text)
 
                     style_name = getattr(paragraph.style, 'name', '').lower() if paragraph.style else ''
                     word_count = len(para_text.split())
 
                     # Check if it's a top-level bullet (no dots in the bullet)
-                    is_top_level = bullet == "" or "." not in bullet
+                    is_top_level = display_bullet == "" or "." not in display_bullet
 
                     # Update header if:
                     # 1. It's a heading style, OR
-                    # 2. It's a short text (≤6 words) AND either has no bullet or has a top-level bullet
+                    # 2. It's a short text (≤6 words)
                     if "heading" in style_name or (word_count < 6):
                         current_header = para_text.strip()
                     # If it's a sub-item (has dots in bullet), don't update the header
@@ -331,7 +398,7 @@ class GenerateParaRefsForDocx:
                         'para_id': self.generate_guid(),
                         'header': current_header,
                         'para_text': para_text,
-                        'bullet': bullet
+                        'bullet': display_bullet
                     })
 
                 elif element.tag.endswith('}tbl'):
@@ -402,6 +469,6 @@ if __name__ == "__main__":
     markdown_output = processor.process_docx_file(args.input_file, args.start_index)
 
     output_file = os.path.splitext(args.input_file)[0] + "_output.md"
-    print("sucess")
+    print("success")
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(markdown_output)
